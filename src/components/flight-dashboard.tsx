@@ -1,0 +1,802 @@
+"use client";
+
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDown,
+  ArrowUp,
+  Check,
+  Circle,
+  Clock3,
+  Compass,
+  Gauge,
+  MapPinned,
+  Radio,
+  Signal,
+  WifiOff,
+} from "lucide-react";
+import EventTimeline from "@/components/event-timeline";
+import AeroTraceHeader from "@/components/aerotrace-header";
+import FlightCharts from "@/components/flight-charts";
+import RouteMap from "@/components/route-map";
+import { ConnectorStatusSchema, TelemetrySampleSchema } from "@/lib/contracts";
+import {
+  claimFlightAction,
+  FLIGHT_API_BASE,
+  FLIGHT_API_CONFIGURATION_ERROR,
+  fetchFlightTelemetryWindow,
+  finalizeFlight,
+  loadFlightReportBundle,
+} from "@/lib/flight-api";
+import { mergeLiveSamples } from "@/lib/live-telemetry";
+import type {
+  ConnectorStatus,
+  FlightLifecycleState,
+  TelemetrySample,
+} from "@/lib/contracts";
+
+const WS_URL = FLIGHT_API_BASE.replace(/^http/, "ws");
+const EMPTY_STATUS: ConnectorStatus = {
+  state: "disconnected",
+  source: null,
+  selectedSource: "demo",
+  simulator: { state: "not_detected", message: null, paused: false },
+  session: null,
+  message: null,
+};
+
+type PendingAction = "starting" | "completing" | null;
+type StreamState = "idle" | "connecting" | "live" | "reconnecting";
+
+const lifecycleLabels: Record<FlightLifecycleState, string> = {
+  disconnected: "DISCONNECTED",
+  connected: "CONNECTED",
+  recording: "RECORDING",
+  finalizing: "FINALIZING",
+  completed: "COMPLETED",
+  interrupted: "INTERRUPTED",
+  error: "ERROR",
+};
+
+function parseStatus(payload: unknown): ConnectorStatus {
+  return ConnectorStatusSchema.parse(payload);
+}
+
+async function responsePayload(response: Response): Promise<unknown> {
+  return response.json().catch(() => null);
+}
+
+function parseError(payload: unknown, fallback: string): string {
+  if (typeof payload === "object" && payload !== null && "detail" in payload) {
+    const detail = payload.detail;
+    if (typeof detail === "string") return detail;
+  }
+  return fallback;
+}
+
+const speedKnots = (mps: number | null | undefined) =>
+  mps == null ? "—" : Math.round(mps * 1.94384).toLocaleString();
+const altitudeFeet = (metres: number | null | undefined) =>
+  metres == null ? "—" : Math.round(metres * 3.28084).toLocaleString();
+const verticalFpm = (mps: number | null | undefined) =>
+  mps == null ? "—" : Math.round(mps * 196.8504).toLocaleString();
+const degrees = (value: number | null | undefined) =>
+  value == null ? "—" : `${Math.round(value).toString().padStart(3, "0")}°`;
+const coordinate = (value: number | null | undefined) =>
+  value == null ? "—" : value.toFixed(4);
+
+export default function FlightDashboard() {
+  const router = useRouter();
+  const [status, setStatus] = useState<ConnectorStatus>(EMPTY_STATUS);
+  const [connectorOnline, setConnectorOnline] = useState(false);
+  const [connectionError, setConnectionError] = useState<string | null>(null);
+  const [operationError, setOperationError] = useState<string | null>(null);
+  const [samples, setSamples] = useState<TelemetrySample[]>([]);
+  const [pending, setPending] = useState<PendingAction>(null);
+  const [completionRetry, setCompletionRetry] = useState<{
+    sessionId: string;
+    confirmed: boolean;
+  } | null>(null);
+  const [streamState, setStreamState] = useState<StreamState>("idle");
+  const pendingRef = useRef(false);
+  const revisionRef = useRef(0);
+  const sessionRef = useRef<string | null>(null);
+
+  const applyStatus = useCallback((next: ConnectorStatus) => {
+    const nextSessionId = next.session?.sessionId ?? null;
+    if (sessionRef.current !== nextSessionId) {
+      sessionRef.current = nextSessionId;
+      setSamples([]);
+    }
+    setStatus(next);
+  }, []);
+
+  const refreshStatus = useCallback(
+    async (signal?: AbortSignal) => {
+      if (pendingRef.current) return;
+      if (FLIGHT_API_CONFIGURATION_ERROR) {
+        setConnectorOnline(false);
+        setConnectionError(FLIGHT_API_CONFIGURATION_ERROR);
+        return;
+      }
+      const revision = revisionRef.current;
+      try {
+        const response = await fetch(`${FLIGHT_API_BASE}/api/status`, {
+          cache: "no-store",
+          signal,
+        });
+        if (!response.ok)
+          throw new Error(`Connector returned ${response.status}`);
+        const parsed = parseStatus(await responsePayload(response));
+        if (revision !== revisionRef.current || pendingRef.current) return;
+        applyStatus(parsed);
+        setConnectorOnline(true);
+        setConnectionError(null);
+      } catch (error) {
+        if (
+          signal?.aborted ||
+          revision !== revisionRef.current ||
+          pendingRef.current
+        )
+          return;
+        setConnectorOnline(false);
+        setConnectionError(
+          error instanceof Error
+            ? `Local connector unavailable · ${error.message}`
+            : "Local connector unavailable",
+        );
+      }
+    },
+    [applyStatus],
+  );
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let active = true;
+    const controller = new AbortController();
+    const poll = async () => {
+      await refreshStatus(controller.signal);
+      if (active) timer = setTimeout(poll, 5000);
+    };
+    void poll();
+    return () => {
+      active = false;
+      controller.abort();
+      if (timer) clearTimeout(timer);
+    };
+  }, [refreshStatus]);
+
+  const sessionId = status.session?.sessionId ?? null;
+  const sessionSource = status.session?.source;
+  const sessionSampleCount = status.session?.sampleCount;
+  useEffect(() => {
+    if (
+      !connectorOnline ||
+      !sessionId ||
+      !sessionSource ||
+      sessionSampleCount == null ||
+      status.state === "recording" ||
+      status.state === "finalizing"
+    ) {
+      return;
+    }
+    const controller = new AbortController();
+    const loadHistory = async () => {
+      try {
+        const history = await fetchFlightTelemetryWindow(
+          sessionId,
+          sessionSource,
+          sessionSampleCount,
+          fetch,
+          controller.signal,
+        );
+        if (!controller.signal.aborted)
+          setSamples((current) => mergeLiveSamples(current, history));
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          setOperationError(
+            error instanceof Error
+              ? `Could not load recorded telemetry · ${error.message}`
+              : "Could not load recorded telemetry",
+          );
+        }
+      }
+    };
+    void loadHistory();
+    return () => controller.abort();
+  }, [
+    connectorOnline,
+    sessionId,
+    sessionSampleCount,
+    sessionSource,
+    status.state,
+  ]);
+
+  useEffect(() => {
+    if (status.state !== "recording" || !sessionId || !status.source) {
+      return;
+    }
+
+    let cancelled = false;
+    let socket: WebSocket | null = null;
+    let retryTimer: ReturnType<typeof setTimeout> | undefined;
+    let retryDelay = 1000;
+    let syncPromise: Promise<void> | null = null;
+    const synchronizeSamples = () => {
+      if (syncPromise) return syncPromise;
+      syncPromise = (async () => {
+        try {
+          const response = await fetch(`${FLIGHT_API_BASE}/api/status`, {
+            cache: "no-store",
+          });
+          if (!response.ok)
+            throw new Error(`Connector returned ${response.status}`);
+          const latestStatus = parseStatus(await responsePayload(response));
+          if (cancelled) return;
+          if (
+            latestStatus.session?.sessionId !== sessionId ||
+            latestStatus.session.source !== status.source ||
+            latestStatus.state !== "recording"
+          ) {
+            applyStatus(latestStatus);
+            return;
+          }
+          const history = await fetchFlightTelemetryWindow(
+            sessionId,
+            status.source,
+            latestStatus.session.sampleCount,
+            fetch,
+          );
+          if (!cancelled)
+            setSamples((current) => mergeLiveSamples(current, history));
+        } catch (error) {
+          if (!cancelled) {
+            setOperationError(
+              error instanceof Error
+                ? `Could not synchronize recent telemetry · ${error.message}`
+                : "Could not synchronize recent telemetry",
+            );
+          }
+        } finally {
+          syncPromise = null;
+        }
+      })();
+      return syncPromise;
+    };
+
+    const connect = () => {
+      if (cancelled) return;
+      setStreamState(retryDelay === 1000 ? "connecting" : "reconnecting");
+      const currentSocket = new WebSocket(`${WS_URL}/ws/telemetry`);
+      socket = currentSocket;
+      currentSocket.onopen = () => {
+        if (cancelled) return;
+        setStreamState("live");
+        retryDelay = 1000;
+        void synchronizeSamples();
+      };
+      currentSocket.onmessage = (event) => {
+        let payload: unknown;
+        try {
+          payload = JSON.parse(String(event.data));
+        } catch {
+          setOperationError(
+            "The connector sent an unreadable telemetry message.",
+          );
+          return;
+        }
+        const parsed = TelemetrySampleSchema.safeParse(payload);
+        if (!parsed.success) {
+          setOperationError(
+            "A telemetry message did not match the supported data contract.",
+          );
+          return;
+        }
+        const sample = parsed.data;
+        if (
+          cancelled ||
+          pendingRef.current ||
+          sample.sessionId !== sessionId ||
+          sample.source !== status.source
+        )
+          return;
+        setSamples((current) => mergeLiveSamples(current, [sample]));
+      };
+      currentSocket.onerror = () => currentSocket.close();
+      currentSocket.onclose = () => {
+        if (cancelled) return;
+        setStreamState("reconnecting");
+        retryTimer = setTimeout(connect, retryDelay);
+        retryDelay = Math.min(retryDelay * 2, 10_000);
+      };
+    };
+
+    connect();
+    return () => {
+      cancelled = true;
+      if (retryTimer) clearTimeout(retryTimer);
+      if (socket) {
+        socket.onopen = null;
+        socket.onmessage = null;
+        socket.onerror = null;
+        socket.onclose = null;
+        socket.close();
+      }
+    };
+  }, [applyStatus, sessionId, status.source, status.state]);
+
+  const startFlight = async () => {
+    if (!connectorOnline || pendingRef.current) return;
+    pendingRef.current = true;
+    revisionRef.current += 1;
+    setPending("starting");
+    setOperationError(null);
+    let failed = false;
+    try {
+      const response = await fetch(`${FLIGHT_API_BASE}/api/flights/start`, {
+        method: "POST",
+      });
+      const payload = await responsePayload(response);
+      if (!response.ok)
+        throw new Error(parseError(payload, "Could not start flight"));
+      const parsed = parseStatus(payload);
+      if (
+        parsed.state !== "recording" ||
+        parsed.source !== parsed.selectedSource ||
+        !parsed.session
+      ) {
+        throw new Error(
+          "Connector did not confirm the selected recording source.",
+        );
+      }
+      applyStatus(parsed);
+      setConnectorOnline(true);
+      setConnectionError(null);
+    } catch (error) {
+      failed = true;
+      setOperationError(
+        error instanceof Error ? error.message : "Could not start flight",
+      );
+    } finally {
+      pendingRef.current = false;
+      setPending(null);
+    }
+    if (failed) void refreshStatus();
+  };
+
+  const selectProvider = async (source: "demo" | "simconnect") => {
+    if (!connectorOnline || pendingRef.current || status.state === "recording")
+      return;
+    pendingRef.current = true;
+    setOperationError(null);
+    try {
+      const response = await fetch(
+        `${FLIGHT_API_BASE}/api/provider/select/${source}`,
+        {
+          method: "POST",
+        },
+      );
+      const payload = await responsePayload(response);
+      if (!response.ok)
+        throw new Error(
+          parseError(payload, `Could not select ${source} provider`),
+        );
+      applyStatus(parseStatus(payload));
+    } catch (error) {
+      setOperationError(
+        error instanceof Error
+          ? error.message
+          : `Could not select ${source} provider`,
+      );
+      void refreshStatus();
+    } finally {
+      pendingRef.current = false;
+    }
+  };
+
+  const completeFlight = async (
+    retry: { sessionId: string; confirmed: boolean } | null = null,
+  ) => {
+    const sessionId = retry?.sessionId ?? status.session?.sessionId;
+    if (!sessionId || pendingRef.current) return;
+    if (!retry && (!connectorOnline || status.state !== "recording")) return;
+    if (!claimFlightAction(pendingRef)) return;
+    revisionRef.current += 1;
+    setPending("completing");
+    setOperationError(null);
+    if (!retry) {
+      setStatus((current) => ({
+        ...current,
+        state: "finalizing",
+        session: current.session
+          ? { ...current.session, state: "finalizing" }
+          : null,
+      }));
+    }
+    let failed = false;
+    let completionConfirmed = retry?.confirmed ?? false;
+    try {
+      if (!completionConfirmed) {
+        const confirmed = await finalizeFlight(sessionId);
+        if (confirmed.session?.sessionId !== sessionId) {
+          throw new Error(
+            "The connector finalized a different flight session.",
+          );
+        }
+        applyStatus(confirmed);
+        completionConfirmed = true;
+        setCompletionRetry({ sessionId, confirmed: true });
+      }
+
+      const savedBundle = await loadFlightReportBundle(sessionId);
+      if (
+        savedBundle.report.recordingStatus !== "complete" ||
+        savedBundle.report.session.completedAt == null
+      ) {
+        throw new Error("The saved report did not confirm a completed flight.");
+      }
+      setCompletionRetry(null);
+      setConnectorOnline(true);
+      setConnectionError(null);
+      router.push(`/flights/${sessionId}`);
+    } catch (error) {
+      failed = true;
+      setCompletionRetry({ sessionId, confirmed: completionConfirmed });
+      setOperationError(
+        completionConfirmed
+          ? `Flight saved, but its report could not be retrieved. ${error instanceof Error ? error.message : "Retry report retrieval."}`
+          : error instanceof Error
+            ? error.message
+            : "Could not complete flight",
+      );
+    } finally {
+      pendingRef.current = false;
+      setPending(null);
+    }
+    if (failed) void refreshStatus();
+  };
+
+  const latest = samples.length > 0 ? samples[samples.length - 1] : null;
+  const totalSampleCount = Math.max(
+    status.session?.sampleCount ?? 0,
+    samples.length,
+  );
+  const lifecycle = status.state;
+  const visibleStreamState = lifecycle === "recording" ? streamState : "idle";
+  const title =
+    lifecycle === "recording" && status.source === "demo"
+      ? "DEMO RECORDING"
+      : lifecycleLabels[lifecycle];
+  const stateColor =
+    lifecycle === "recording"
+      ? "#72c3a0"
+      : lifecycle === "completed"
+        ? "#78a8bd"
+        : lifecycle === "error"
+          ? "#df786e"
+          : lifecycle === "finalizing"
+            ? "#d2ad70"
+            : connectorOnline
+              ? "#aeb8bf"
+              : "#df786e";
+  const actionLabel =
+    pending === "starting"
+      ? "STARTING FLIGHT…"
+      : pending === "completing"
+        ? "FINALIZING…"
+        : lifecycle === "recording"
+          ? "COMPLETE FLIGHT"
+          : status.selectedSource === "demo"
+            ? "START DEMO FLIGHT"
+            : "START MSFS FLIGHT";
+
+  return (
+    <main className="dashboard-shell">
+      <AeroTraceHeader>
+        <div className="header-right">
+          <div
+            className={`connector-indicator ${connectorOnline ? "online" : "offline"}`}
+            role="status"
+          >
+            {connectorOnline ? <Signal size={14} /> : <WifiOff size={14} />}
+            <span>LOCAL CONNECTOR</span>
+            <strong>{connectorOnline ? "ONLINE" : "OFFLINE"}</strong>
+          </div>
+          <div className="header-divider" />
+          <div className="sim-indicator">
+            <span className="sim-light" />
+            <span>MSFS</span>
+            <strong>
+              {status.simulator.paused
+                ? "PAUSED"
+                : status.simulator.state.replaceAll("_", " ").toUpperCase()}
+            </strong>
+          </div>
+        </div>
+      </AeroTraceHeader>
+
+      <div className="dashboard-content">
+        <section className="flight-strip" aria-label="Current flight status">
+          <div className="flight-strip-title">
+            <span className="eyebrow">FLIGHT OPERATIONS</span>
+            <h1>{status.session?.aircraft ?? "Flight recorder"}</h1>
+          </div>
+          <div className="flight-state-block">
+            <Circle size={9} fill={stateColor} color={stateColor} />
+            <div>
+              <span className="eyebrow">LIFECYCLE</span>
+              <strong>{title}</strong>
+            </div>
+          </div>
+          <div className="flight-meta">
+            <span className="eyebrow">SESSION</span>
+            <strong>
+              {status.session?.sessionId.slice(0, 8).toUpperCase() ?? "—"}
+            </strong>
+          </div>
+          <div className="flight-meta">
+            <span className="eyebrow">SAMPLES</span>
+            <strong>{totalSampleCount.toLocaleString()}</strong>
+          </div>
+          <div className="flight-meta flight-source">
+            <span className="eyebrow">SOURCE</span>
+            <strong>
+              {status.source === "demo"
+                ? "SYNTHETIC"
+                : status.source === "simconnect"
+                  ? "SIMCONNECT"
+                  : "—"}
+            </strong>
+          </div>
+          <div className="flight-action">
+            {lifecycle !== "recording" && lifecycle !== "finalizing" && (
+              <div className="provider-choice" aria-label="Telemetry source">
+                <button
+                  type="button"
+                  aria-pressed={status.selectedSource === "simconnect"}
+                  onClick={() => void selectProvider("simconnect")}
+                  disabled={!connectorOnline || pending !== null}
+                >
+                  MSFS
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={status.selectedSource === "demo"}
+                  onClick={() => void selectProvider("demo")}
+                  disabled={!connectorOnline || pending !== null}
+                >
+                  DEMO
+                </button>
+              </div>
+            )}
+            {lifecycle === "recording" ? (
+              <button
+                type="button"
+                className="control-button complete"
+                onClick={() => void completeFlight()}
+                disabled={!connectorOnline || pending !== null}
+              >
+                <Check size={15} /> {actionLabel}
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="control-button start"
+                onClick={() => void startFlight()}
+                disabled={
+                  !connectorOnline ||
+                  pending !== null ||
+                  lifecycle === "finalizing"
+                }
+              >
+                <Radio size={15} /> {actionLabel}
+              </button>
+            )}
+          </div>
+        </section>
+
+        {status.source === "demo" && status.state === "recording" && (
+          <div className="demo-banner" role="status">
+            <AlertTriangle size={15} />
+            <strong>DEMO MODE</strong>
+            <span>Synthetic telemetry · not a real MSFS recording</span>
+          </div>
+        )}
+        {!connectorOnline && (
+          <div className="error-banner" role="alert">
+            <WifiOff size={15} />
+            <span>
+              {connectionError ??
+                "The local AeroTrace connector is not responding."}
+            </span>
+          </div>
+        )}
+        {(operationError || status.message || status.simulator.message) && (
+          <div className="error-banner" role="alert">
+            <AlertTriangle size={15} />
+            <span>
+              {operationError ?? status.message ?? status.simulator.message}
+            </span>
+            {completionRetry && (
+              <button
+                type="button"
+                className="error-retry-button"
+                onClick={() => void completeFlight(completionRetry)}
+                disabled={pending !== null}
+              >
+                {pending === "completing"
+                  ? "RETRYING…"
+                  : completionRetry.confirmed
+                    ? "RETRY REPORT"
+                    : "RETRY COMPLETION"}
+              </button>
+            )}
+          </div>
+        )}
+
+        <div className="primary-grid">
+          <RouteMap
+            samples={samples}
+            sessionId={sessionId}
+            state={lifecycle}
+            connectorOnline={connectorOnline}
+          />
+          <section
+            className="telemetry-panel"
+            aria-labelledby="telemetry-title"
+          >
+            <div className="panel-heading">
+              <div>
+                <span className="eyebrow">LIVE INSTRUMENTS</span>
+                <h2 id="telemetry-title">Telemetry</h2>
+              </div>
+              <div className={`stream-indicator ${visibleStreamState}`}>
+                <span />{" "}
+                {visibleStreamState === "live"
+                  ? "STREAM LIVE"
+                  : visibleStreamState === "reconnecting"
+                    ? "RECONNECTING"
+                    : visibleStreamState === "connecting"
+                      ? "CONNECTING"
+                      : "STREAM IDLE"}
+              </div>
+            </div>
+            <div className="instrument-primary">
+              <div>
+                <span className="eyebrow">ALTITUDE</span>
+                <div className="instrument-value large">
+                  {altitudeFeet(latest?.altitudeM)}
+                  <span>FT</span>
+                </div>
+              </div>
+              <div className="instrument-primary-icon">
+                <Gauge size={19} />
+              </div>
+            </div>
+            <div className="instrument-grid">
+              <Instrument
+                label="AIRSPEED"
+                value={speedKnots(latest?.airspeedMps)}
+                unit="KT"
+                icon={<ArrowUp size={13} />}
+              />
+              <Instrument
+                label="GROUND SPEED"
+                value={speedKnots(latest?.groundSpeedMps)}
+                unit="KT"
+                icon={<Activity size={13} />}
+              />
+              <Instrument
+                label="VERTICAL SPEED"
+                value={verticalFpm(latest?.verticalSpeedMps)}
+                unit="FT/MIN"
+                icon={
+                  latest?.verticalSpeedMps != null &&
+                  latest.verticalSpeedMps < 0 ? (
+                    <ArrowDown size={13} />
+                  ) : (
+                    <ArrowUp size={13} />
+                  )
+                }
+              />
+              <Instrument
+                label="HEADING"
+                value={degrees(latest?.headingDeg)}
+                unit="DEG"
+                icon={<Compass size={13} />}
+              />
+              <Instrument
+                label="LATITUDE"
+                value={coordinate(latest?.latitudeDeg)}
+                unit="°"
+                icon={<MapPinned size={13} />}
+              />
+              <Instrument
+                label="LONGITUDE"
+                value={coordinate(latest?.longitudeDeg)}
+                unit="°"
+                icon={<MapPinned size={13} />}
+              />
+            </div>
+            <div className="ground-state">
+              <span>ON-GROUND STATUS</span>
+              <strong
+                className={
+                  latest?.onGround == null
+                    ? "unavailable"
+                    : latest.onGround
+                      ? "ground"
+                      : "airborne"
+                }
+              >
+                {latest?.onGround == null
+                  ? "UNAVAILABLE"
+                  : latest.onGround
+                    ? "ON GROUND"
+                    : "AIRBORNE"}
+              </strong>
+            </div>
+            <div className="telemetry-foot">
+              <span>
+                <Clock3 size={12} />{" "}
+                {latest
+                  ? new Date(latest.timestamp).toLocaleTimeString()
+                  : "NO SAMPLE"}
+              </span>
+              <span>
+                {latest?.quality === "calculated"
+                  ? "CALCULATED"
+                  : latest
+                    ? "OBSERVED"
+                    : "NO DATA"}
+              </span>
+            </div>
+          </section>
+        </div>
+
+        <FlightCharts
+          samples={samples}
+          sessionStartedAt={status.session?.startedAt ?? null}
+          totalSampleCount={totalSampleCount}
+        />
+        <EventTimeline session={status.session} samples={samples} />
+
+        <footer className="app-footer">
+          <span>AEROTRACE · LOCAL FLIGHT RECORDER</span>
+          <span>
+            {connectorOnline
+              ? "127.0.0.1 · CONNECTOR READY"
+              : "LOCAL CONNECTOR OFFLINE"}
+          </span>
+        </footer>
+      </div>
+    </main>
+  );
+}
+
+function Instrument({
+  label,
+  value,
+  unit,
+  icon,
+}: {
+  label: string;
+  value: string;
+  unit: string;
+  icon: React.ReactNode;
+}) {
+  return (
+    <div className="instrument-cell">
+      <div className="instrument-label">
+        <span>{icon}</span>
+        {label}
+      </div>
+      <div className="instrument-value">
+        {value}
+        <span>{unit}</span>
+      </div>
+    </div>
+  );
+}
