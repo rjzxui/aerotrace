@@ -10,7 +10,11 @@ import {
   RefreshCw,
 } from "lucide-react";
 import AeroTraceHeader from "@/components/aerotrace-header";
-import { fetchFlightList, fetchFlightReport } from "@/lib/flight-api";
+import {
+  fetchFlightList,
+  fetchFlightReport,
+  IS_PUBLIC_DEMO_MODE,
+} from "@/lib/flight-api";
 import type { FlightReport, FlightSession } from "@/lib/contracts";
 
 type HistoryData = {
@@ -134,9 +138,17 @@ export default function FlightHistory() {
       <div className="history-shell">
         <div className="history-heading">
           <div>
-            <span className="eyebrow">LOCAL ARCHIVE · SQLITE</span>
+            <span className="eyebrow">
+              {IS_PUBLIC_DEMO_MODE
+                ? "SAMPLE FLIGHT ARCHIVE"
+                : "LOCAL ARCHIVE · SQLITE"}
+            </span>
             <h1>Flight history</h1>
-            <p>Persisted AeroTrace sessions from this computer.</p>
+            <p>
+              {IS_PUBLIC_DEMO_MODE
+                ? "Sample flight records for exploring AeroTrace."
+                : "Persisted AeroTrace sessions from this computer."}
+            </p>
           </div>
           <Link href="/" className="text-link">
             OPEN RECORDER <ArrowUpRight size={14} />
@@ -178,7 +190,11 @@ export default function FlightHistory() {
                 {data.sessions.length.toLocaleString()} SAVED SESSION
                 {data.sessions.length === 1 ? "" : "S"}
               </span>
-              <span>LOCAL DATABASE · NEWEST FIRST</span>
+              <span>
+                {IS_PUBLIC_DEMO_MODE
+                  ? "SAMPLE RECORDS · NEWEST FIRST"
+                  : "LOCAL DATABASE · NEWEST FIRST"}
+              </span>
             </div>
             <div className="history-list">
               {data.sessions.map((session) => {
@@ -233,8 +249,9 @@ export default function FlightHistory() {
               })}
             </div>
             <p className="history-footnote">
-              A missing summary does not remove the saved session. Open the
-              record to retry its report and telemetry.
+              {IS_PUBLIC_DEMO_MODE
+                ? "All listed records use generated sample data; no local flight archive is read."
+                : "A missing summary does not remove the saved session. Open the record to retry its report and telemetry."}
             </p>
           </>
         )}

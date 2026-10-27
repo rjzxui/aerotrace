@@ -1183,6 +1183,28 @@ button:focus-visible {
   border-bottom: 1px solid #222c34;
   background: #0b1116;
 }
+.public-demo-banner {
+  min-height: 34px;
+  padding: 7px clamp(18px, 3.4vw, 58px);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 8px 14px;
+  border-bottom: 1px solid #766343;
+  background: #211c13;
+  color: #e5c98f;
+  font-size: 8px;
+  letter-spacing: 0.12em;
+  text-align: center;
+}
+.public-demo-banner strong {
+  color: #f0d9a6;
+  font-weight: 700;
+}
+.public-demo-banner span {
+  color: #b9a77f;
+}
 .brand-lockup,
 .header-right,
 .connector-indicator,
@@ -1242,6 +1264,15 @@ button:focus-visible {
 }
 .connector-indicator.offline svg {
   color: #dd8077;
+}
+.demo-readonly-label {
+  padding: 9px 12px;
+  border: 1px solid #675a40;
+  color: #d9c28f;
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  white-space: nowrap;
 }
 .header-divider {
   width: 1px;

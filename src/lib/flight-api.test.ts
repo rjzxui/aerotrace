@@ -2,14 +2,26 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
   claimFlightAction,
+  fetchFlightAnalysis,
   fetchFlightList,
   fetchFlightReport,
   fetchFlightTelemetry,
   fetchFlightTelemetryWindow,
   finalizeFlight,
+  IS_PUBLIC_DEMO_MODE,
   loadFlightReportBundle,
+  parsePublicDemoMode,
+  requestLocalConnector,
+  resolveFlightApiConfiguration,
   resolveLocalApiUrl,
 } from "./flight-api.ts";
+import { DEMO_FLIGHT_SESSIONS, DEMO_PRIMARY_BUNDLE } from "./demo-data.ts";
+import {
+  FlightAnalysisSchema,
+  FlightReportSchema,
+  FlightSessionSchema,
+  TelemetrySampleSchema,
+} from "./contracts.ts";
 import {
   buildFlightChartPoints,
   formatElapsedMinutes,
@@ -215,6 +227,123 @@ test("local API override accepts loopback only and rejects remote destinations",
     assert.equal(result.baseUrl, "http://127.0.0.1:8765");
     assert.match(result.error ?? "", /local HTTP/);
   }
+});
+
+test("public demo flag is explicit and isolates the public build from loopback", async () => {
+  assert.equal(parsePublicDemoMode("true"), true);
+  assert.equal(parsePublicDemoMode(" TRUE "), true);
+  assert.equal(parsePublicDemoMode("false"), false);
+  assert.equal(parsePublicDemoMode("1"), false);
+  assert.equal(parsePublicDemoMode(undefined), false);
+
+  assert.deepEqual(
+    resolveFlightApiConfiguration("http://127.0.0.1:8765", true),
+    { baseUrl: "", error: null },
+  );
+  assert.equal(
+    IS_PUBLIC_DEMO_MODE,
+    parsePublicDemoMode(process.env.NEXT_PUBLIC_DEMO_MODE),
+  );
+
+  let requestCount = 0;
+  const forbiddenFetch = fetchStub(() => {
+    requestCount += 1;
+    throw new Error("The local connector must not be contacted.");
+  });
+  await assert.rejects(
+    requestLocalConnector("/api/status", undefined, forbiddenFetch, true),
+    /disabled in public demo mode/,
+  );
+  assert.equal(requestCount, 0);
+});
+
+test("demo flight list, detail, telemetry and report use existing contracts without fetch", async () => {
+  let requestCount = 0;
+  const forbiddenFetch = fetchStub(() => {
+    requestCount += 1;
+    throw new Error("Demo mode must not fetch connector data.");
+  });
+  const sessions = await fetchFlightList(forbiddenFetch, true);
+  assert.equal(sessions.length, 3);
+  assert.deepEqual(
+    FlightSessionSchema.array()
+      .parse(sessions)
+      .map((session) => session.source),
+    ["demo", "demo", "demo"],
+  );
+
+  const session = sessions[0];
+  const bundle = await loadFlightReportBundle(
+    session.sessionId,
+    forbiddenFetch,
+    true,
+  );
+  assert.equal(bundle.report.recordingStatus, "complete");
+  assert.equal(bundle.report.session.state, "completed");
+  assert.equal(bundle.report.summary.inputProvenance, "calculated");
+  assert.equal(bundle.telemetry.length, session.sampleCount);
+  assert.equal(bundle.telemetry[0].source, "demo");
+  assert.equal(bundle.telemetry[0].quality, "calculated");
+  assert.ok(bundle.telemetry.some((sample) => sample.altitudeM != null));
+  assert.ok(bundle.telemetry.some((sample) => sample.airspeedMps != null));
+
+  FlightReportSchema.parse(bundle.report);
+  FlightAnalysisSchema.parse(bundle.analysis);
+  TelemetrySampleSchema.array().parse(bundle.telemetry);
+  assert.deepEqual(
+    await fetchFlightReport(session.sessionId, forbiddenFetch, true),
+    bundle.report,
+  );
+  assert.deepEqual(
+    await fetchFlightAnalysis(session.sessionId, forbiddenFetch, true),
+    bundle.analysis,
+  );
+  assert.deepEqual(
+    await fetchFlightTelemetryWindow(
+      session.sessionId,
+      "demo",
+      session.sampleCount,
+      forbiddenFetch,
+      undefined,
+      true,
+    ),
+    bundle.telemetry,
+  );
+  assert.deepEqual(
+    await fetchFlightTelemetry(
+      session.sessionId,
+      "demo",
+      forbiddenFetch,
+      undefined,
+      true,
+    ),
+    bundle.telemetry,
+  );
+  await assert.rejects(
+    fetchFlightTelemetry(
+      session.sessionId,
+      "simconnect",
+      forbiddenFetch,
+      undefined,
+      true,
+    ),
+    /did not match the selected flight session/,
+  );
+  assert.deepEqual(DEMO_FLIGHT_SESSIONS, sessions);
+  assert.equal(DEMO_PRIMARY_BUNDLE.report.session.sessionId, session.sessionId);
+  await assert.rejects(
+    finalizeFlight(session.sessionId, forbiddenFetch, true),
+    /disabled in public demo mode/,
+  );
+  await assert.rejects(
+    loadFlightReportBundle(
+      "00000000-0000-4000-8000-000000000000",
+      forbiddenFetch,
+      true,
+    ),
+    /Sample flight not found/,
+  );
+  assert.equal(requestCount, 0);
 });
 
 test("elapsed chart labels retain seconds for sub-minute flights", () => {

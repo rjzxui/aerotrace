@@ -22,13 +22,16 @@ import AeroTraceHeader from "@/components/aerotrace-header";
 import FlightCharts from "@/components/flight-charts";
 import RouteMap from "@/components/route-map";
 import { ConnectorStatusSchema, TelemetrySampleSchema } from "@/lib/contracts";
+import { DEMO_PRIMARY_BUNDLE, DEMO_PRIMARY_STATUS } from "@/lib/demo-data";
 import {
   claimFlightAction,
   FLIGHT_API_BASE,
   FLIGHT_API_CONFIGURATION_ERROR,
   fetchFlightTelemetryWindow,
   finalizeFlight,
+  IS_PUBLIC_DEMO_MODE,
   loadFlightReportBundle,
+  requestLocalConnector,
 } from "@/lib/flight-api";
 import { mergeLiveSamples } from "@/lib/live-telemetry";
 import type {
@@ -89,11 +92,15 @@ const coordinate = (value: number | null | undefined) =>
 
 export default function FlightDashboard() {
   const router = useRouter();
-  const [status, setStatus] = useState<ConnectorStatus>(EMPTY_STATUS);
-  const [connectorOnline, setConnectorOnline] = useState(false);
+  const [status, setStatus] = useState<ConnectorStatus>(
+    IS_PUBLIC_DEMO_MODE ? DEMO_PRIMARY_STATUS : EMPTY_STATUS,
+  );
+  const [connectorOnline, setConnectorOnline] = useState(IS_PUBLIC_DEMO_MODE);
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const [operationError, setOperationError] = useState<string | null>(null);
-  const [samples, setSamples] = useState<TelemetrySample[]>([]);
+  const [samples, setSamples] = useState<TelemetrySample[]>(
+    IS_PUBLIC_DEMO_MODE ? DEMO_PRIMARY_BUNDLE.telemetry : [],
+  );
   const [pending, setPending] = useState<PendingAction>(null);
   const [completionRetry, setCompletionRetry] = useState<{
     sessionId: string;
@@ -115,6 +122,7 @@ export default function FlightDashboard() {
 
   const refreshStatus = useCallback(
     async (signal?: AbortSignal) => {
+      if (IS_PUBLIC_DEMO_MODE) return;
       if (pendingRef.current) return;
       if (FLIGHT_API_CONFIGURATION_ERROR) {
         setConnectorOnline(false);
@@ -123,7 +131,7 @@ export default function FlightDashboard() {
       }
       const revision = revisionRef.current;
       try {
-        const response = await fetch(`${FLIGHT_API_BASE}/api/status`, {
+        const response = await requestLocalConnector("/api/status", {
           cache: "no-store",
           signal,
         });
@@ -153,6 +161,7 @@ export default function FlightDashboard() {
   );
 
   useEffect(() => {
+    if (IS_PUBLIC_DEMO_MODE) return;
     let timer: ReturnType<typeof setTimeout> | undefined;
     let active = true;
     const controller = new AbortController();
@@ -173,6 +182,7 @@ export default function FlightDashboard() {
   const sessionSampleCount = status.session?.sampleCount;
   useEffect(() => {
     if (
+      IS_PUBLIC_DEMO_MODE ||
       !connectorOnline ||
       !sessionId ||
       !sessionSource ||
@@ -215,7 +225,12 @@ export default function FlightDashboard() {
   ]);
 
   useEffect(() => {
-    if (status.state !== "recording" || !sessionId || !status.source) {
+    if (
+      IS_PUBLIC_DEMO_MODE ||
+      status.state !== "recording" ||
+      !sessionId ||
+      !status.source
+    ) {
       return;
     }
 
@@ -228,7 +243,7 @@ export default function FlightDashboard() {
       if (syncPromise) return syncPromise;
       syncPromise = (async () => {
         try {
-          const response = await fetch(`${FLIGHT_API_BASE}/api/status`, {
+          const response = await requestLocalConnector("/api/status", {
             cache: "no-store",
           });
           if (!response.ok)
@@ -328,14 +343,14 @@ export default function FlightDashboard() {
   }, [applyStatus, sessionId, status.source, status.state]);
 
   const startFlight = async () => {
-    if (!connectorOnline || pendingRef.current) return;
+    if (IS_PUBLIC_DEMO_MODE || !connectorOnline || pendingRef.current) return;
     pendingRef.current = true;
     revisionRef.current += 1;
     setPending("starting");
     setOperationError(null);
     let failed = false;
     try {
-      const response = await fetch(`${FLIGHT_API_BASE}/api/flights/start`, {
+      const response = await requestLocalConnector("/api/flights/start", {
         method: "POST",
       });
       const payload = await responsePayload(response);
@@ -367,16 +382,19 @@ export default function FlightDashboard() {
   };
 
   const selectProvider = async (source: "demo" | "simconnect") => {
-    if (!connectorOnline || pendingRef.current || status.state === "recording")
+    if (
+      IS_PUBLIC_DEMO_MODE ||
+      !connectorOnline ||
+      pendingRef.current ||
+      status.state === "recording"
+    )
       return;
     pendingRef.current = true;
     setOperationError(null);
     try {
-      const response = await fetch(
-        `${FLIGHT_API_BASE}/api/provider/select/${source}`,
-        {
-          method: "POST",
-        },
+      const response = await requestLocalConnector(
+        `/api/provider/select/${source}`,
+        { method: "POST" },
       );
       const payload = await responsePayload(response);
       if (!response.ok)
@@ -399,6 +417,7 @@ export default function FlightDashboard() {
   const completeFlight = async (
     retry: { sessionId: string; confirmed: boolean } | null = null,
   ) => {
+    if (IS_PUBLIC_DEMO_MODE) return;
     const sessionId = retry?.sessionId ?? status.session?.sessionId;
     if (!sessionId || pendingRef.current) return;
     if (!retry && (!connectorOnline || status.state !== "recording")) return;
@@ -500,20 +519,34 @@ export default function FlightDashboard() {
             className={`connector-indicator ${connectorOnline ? "online" : "offline"}`}
             role="status"
           >
-            {connectorOnline ? <Signal size={14} /> : <WifiOff size={14} />}
-            <span>LOCAL CONNECTOR</span>
-            <strong>{connectorOnline ? "ONLINE" : "OFFLINE"}</strong>
+            {IS_PUBLIC_DEMO_MODE ? (
+              <>
+                <Signal size={14} />
+                <span>SAMPLE TELEMETRY</span>
+                <strong>READY</strong>
+              </>
+            ) : (
+              <>
+                {connectorOnline ? <Signal size={14} /> : <WifiOff size={14} />}
+                <span>LOCAL CONNECTOR</span>
+                <strong>{connectorOnline ? "ONLINE" : "OFFLINE"}</strong>
+              </>
+            )}
           </div>
-          <div className="header-divider" />
-          <div className="sim-indicator">
-            <span className="sim-light" />
-            <span>MSFS</span>
-            <strong>
-              {status.simulator.paused
-                ? "PAUSED"
-                : status.simulator.state.replaceAll("_", " ").toUpperCase()}
-            </strong>
-          </div>
+          {!IS_PUBLIC_DEMO_MODE && (
+            <>
+              <div className="header-divider" />
+              <div className="sim-indicator">
+                <span className="sim-light" />
+                <span>MSFS</span>
+                <strong>
+                  {status.simulator.paused
+                    ? "PAUSED"
+                    : status.simulator.state.replaceAll("_", " ").toUpperCase()}
+                </strong>
+              </div>
+            </>
+          )}
         </div>
       </AeroTraceHeader>
 
@@ -551,27 +584,31 @@ export default function FlightDashboard() {
             </strong>
           </div>
           <div className="flight-action">
-            {lifecycle !== "recording" && lifecycle !== "finalizing" && (
-              <div className="provider-choice" aria-label="Telemetry source">
-                <button
-                  type="button"
-                  aria-pressed={status.selectedSource === "simconnect"}
-                  onClick={() => void selectProvider("simconnect")}
-                  disabled={!connectorOnline || pending !== null}
-                >
-                  MSFS
-                </button>
-                <button
-                  type="button"
-                  aria-pressed={status.selectedSource === "demo"}
-                  onClick={() => void selectProvider("demo")}
-                  disabled={!connectorOnline || pending !== null}
-                >
-                  DEMO
-                </button>
-              </div>
-            )}
-            {lifecycle === "recording" ? (
+            {!IS_PUBLIC_DEMO_MODE &&
+              lifecycle !== "recording" &&
+              lifecycle !== "finalizing" && (
+                <div className="provider-choice" aria-label="Telemetry source">
+                  <button
+                    type="button"
+                    aria-pressed={status.selectedSource === "simconnect"}
+                    onClick={() => void selectProvider("simconnect")}
+                    disabled={!connectorOnline || pending !== null}
+                  >
+                    MSFS
+                  </button>
+                  <button
+                    type="button"
+                    aria-pressed={status.selectedSource === "demo"}
+                    onClick={() => void selectProvider("demo")}
+                    disabled={!connectorOnline || pending !== null}
+                  >
+                    DEMO
+                  </button>
+                </div>
+              )}
+            {IS_PUBLIC_DEMO_MODE ? (
+              <span className="demo-readonly-label">READ-ONLY SAMPLE</span>
+            ) : lifecycle === "recording" ? (
               <button
                 type="button"
                 className="control-button complete"
@@ -649,7 +686,11 @@ export default function FlightDashboard() {
           >
             <div className="panel-heading">
               <div>
-                <span className="eyebrow">LIVE INSTRUMENTS</span>
+                <span className="eyebrow">
+                  {IS_PUBLIC_DEMO_MODE
+                    ? "SAMPLE TELEMETRY"
+                    : "LIVE INSTRUMENTS"}
+                </span>
                 <h2 id="telemetry-title">Telemetry</h2>
               </div>
               <div className={`stream-indicator ${visibleStreamState}`}>
@@ -660,7 +701,9 @@ export default function FlightDashboard() {
                     ? "RECONNECTING"
                     : visibleStreamState === "connecting"
                       ? "CONNECTING"
-                      : "STREAM IDLE"}
+                      : IS_PUBLIC_DEMO_MODE
+                        ? "SAMPLE RECORD"
+                        : "STREAM IDLE"}
               </div>
             </div>
             <div className="instrument-primary">
@@ -742,7 +785,7 @@ export default function FlightDashboard() {
               <span>
                 <Clock3 size={12} />{" "}
                 {latest
-                  ? new Date(latest.timestamp).toLocaleTimeString()
+                  ? `${new Date(latest.timestamp).toISOString().slice(11, 19)} UTC`
                   : "NO SAMPLE"}
               </span>
               <span>
@@ -764,11 +807,17 @@ export default function FlightDashboard() {
         <EventTimeline session={status.session} samples={samples} />
 
         <footer className="app-footer">
-          <span>AEROTRACE · LOCAL FLIGHT RECORDER</span>
           <span>
-            {connectorOnline
-              ? "127.0.0.1 · CONNECTOR READY"
-              : "LOCAL CONNECTOR OFFLINE"}
+            {IS_PUBLIC_DEMO_MODE
+              ? "AEROTRACE · SAMPLE FLIGHT RECORDER"
+              : "AEROTRACE · LOCAL FLIGHT RECORDER"}
+          </span>
+          <span>
+            {IS_PUBLIC_DEMO_MODE
+              ? "SAMPLE DATA · LOCAL CONNECTOR NOT USED"
+              : connectorOnline
+                ? "127.0.0.1 · CONNECTOR READY"
+                : "LOCAL CONNECTOR OFFLINE"}
           </span>
         </footer>
       </div>

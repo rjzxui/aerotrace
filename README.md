@@ -24,6 +24,19 @@ npm run connector
 
 In another terminal, run `npm run dev`, then open <http://127.0.0.1:3000>. The frontend and connector bind to loopback only (`127.0.0.1:3000` and `127.0.0.1:8765`). The frontend uses Next.js Webpack mode for the MapLibre ESM worker in this Windows setup. Do not change either bind address to `0.0.0.0` for ordinary local use. The frontend rejects connector URL overrides that do not point to loopback HTTP.
 
+## Public demo deployment
+
+`NEXT_PUBLIC_DEMO_MODE` selects the data source at **build time**. Set it to `true` in the deployment platform's build environment before building the public demo. The recorder, flight history, and report pages then use generated sample flights through the existing flight contracts and UI. Recording controls are read-only, and the local Python connector and local archive are not contacted. Every page displays **DEMO DATA — NOT LIVE MSFS TELEMETRY**. MapLibre's existing public demo map style still needs an internet connection.
+
+Deployment steps:
+
+1. Use a hosting platform with Next.js App Router support and configure `NEXT_PUBLIC_DEMO_MODE=true` for the production build (and preview builds, if needed).
+2. Build and deploy the Next.js app with the platform's standard Next.js integration: `npm ci` followed by `npm run build`.
+3. Do not deploy or start `npm run connector` for the public demo. Verify `/`, `/flights`, and a flight opened from the sample list after deployment.
+4. To return to a local MSFS build, set `NEXT_PUBLIC_DEMO_MODE=false` or remove it, then rebuild and deploy. `NEXT_PUBLIC_` values are embedded at build time, so changing the platform variable without rebuilding does not change the running bundle.
+
+For a local production preview of the sample-data build, set `NEXT_PUBLIC_DEMO_MODE=true` before `npm run build`, then run `npm run start`. The existing local connector behavior is preserved when the flag is `false` or unset.
+
 To exercise the workflow, select **DEMO**, choose **Start Demo Flight**, let samples arrive, then choose **Complete Flight**. For real recording, install the optional package in the project environment with `python -m pip install -r requirements-msfs.txt`, start MSFS, select **MSFS**, wait for **WAITING FOR FLIGHT**, then choose **Start MSFS Flight**. Complete Flight persists only observed SimConnect readings. A missing SimVar remains unavailable; a paused simulator produces no samples. The selected provider cannot be switched during recording. Completed sessions and samples are saved under `%USERPROFILE%\.aerotrace\flights.sqlite3` by default. Set `AEROTRACE_DB` to use a different SQLite file. Set `NEXT_PUBLIC_AEROTRACE_API_URL` if the loopback connector uses a different local URL.
 
 The route map loads its style and vector tiles from `https://demotiles.maplibre.org/style.json`, a public MapLibre demo service. Map tiles require an internet connection; telemetry capture, charts and local persistence continue to use the local connector. Replace this style with a production tile provider before distributing AeroTrace broadly. The app does not send telemetry to the tile provider.

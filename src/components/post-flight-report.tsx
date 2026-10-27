@@ -14,7 +14,7 @@ import AeroTraceHeader from "@/components/aerotrace-header";
 import FlightReplayMap from "@/components/flight-replay-map";
 import FlightReportCharts from "@/components/flight-report-charts";
 import FlightReportTimeline from "@/components/flight-report-timeline";
-import { loadFlightReportBundle } from "@/lib/flight-api";
+import { IS_PUBLIC_DEMO_MODE, loadFlightReportBundle } from "@/lib/flight-api";
 import type { FlightReportBundle } from "@/lib/flight-api";
 import type { TelemetrySample } from "@/lib/contracts";
 
@@ -217,9 +217,15 @@ export default function PostFlightReport({ sessionId }: { sessionId: string }) {
         {loading && (
           <section className="report-loading" role="status">
             <RefreshCw size={19} className="spin-icon" />
-            <span>LOADING PERSISTED FLIGHT RECORD</span>
+            <span>
+              {IS_PUBLIC_DEMO_MODE
+                ? "LOADING SAMPLE FLIGHT RECORD"
+                : "LOADING PERSISTED FLIGHT RECORD"}
+            </span>
             <small>
-              Retrieving the saved session, analysis and telemetry pages.
+              {IS_PUBLIC_DEMO_MODE
+                ? "Preparing sample session, analysis and telemetry."
+                : "Retrieving the saved session, analysis and telemetry pages."}
             </small>
           </section>
         )}
@@ -681,7 +687,11 @@ export default function PostFlightReport({ sessionId }: { sessionId: string }) {
           </>
         )}
         <footer className="report-footer">
-          <span>AEROTRACE · LOCAL FLIGHT DEBRIEF</span>
+          <span>
+            {IS_PUBLIC_DEMO_MODE
+              ? "AEROTRACE · SAMPLE FLIGHT DEBRIEF"
+              : "AEROTRACE · LOCAL FLIGHT DEBRIEF"}
+          </span>
           <Link href="/flights" className="text-link">
             OPEN FLIGHT HISTORY <span aria-hidden="true">↗</span>
           </Link>
