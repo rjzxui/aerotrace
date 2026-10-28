@@ -1,0 +1,4 @@
+# Optional Windows-only integration, isolated from the demo/runtime requirements.
+# The package describes MSFS 2020 support. MSFS 2024 legacy-client operation is
+# documented by Microsoft, but must still be verified against an installed sim.
+SimConnect==0.4.26

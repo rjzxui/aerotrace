@@ -1,0 +1,38 @@
+{
+  "name": "aerotrace",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev --webpack --hostname 127.0.0.1",
+    "build": "next build --webpack",
+    "start": "next start --hostname 127.0.0.1",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "connector": "python -m uvicorn connector.api:app --app-dir . --host 127.0.0.1 --port 8765",
+    "connector:demo": "python -m uvicorn connector.api:app --app-dir . --host 127.0.0.1 --port 8765",
+    "test:frontend": "node --disable-warning=MODULE_TYPELESS_PACKAGE_JSON --test src/lib/flight-api.test.ts src/lib/demo-recorder.test.ts",
+    "test:connector": "python -m pytest connector/tests -q --basetemp=.pytest-work"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "lucide-react": "^0.468.0",
+    "maplibre-gl": "^6.15.0",
+    "next": "^16.0.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^3.10.1",
+    "zod": "^4.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.0.0",
+    "eslint-config-next": "^16.0.0",
+    "prettier": "^3.5.0",
+    "prettier-plugin-tailwindcss": "^0.6.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.7.0"
+  }
+}

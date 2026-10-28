@@ -1,0 +1,15 @@
+node_modules/
+.next/
+out/
+dist/
+coverage/
+__pycache__/
+.pytest_cache/
+.pytest-tmp*/
+.pytest-temp/
+.pytest-work/
+.venv/
+*.py[cod]
+*.sqlite3
+.env*
+!.env.example
